@@ -14,9 +14,8 @@ A private `/admin` dashboard shows live stock status across all tracked products
 |---|---|---|
 | Best Buy | Official developer API | Lorcana, Star Wars Unlimited, Cardsmiths, and other first-party TCG products |
 | Target | Internal Redsky API (curated TCIN list) | Pokémon TCG, Magic: The Gathering, Yu-Gi-Oh!, One Piece, Disney Lorcana, Star Wars Unlimited, Digimon, Dragon Ball Super, Flesh and Blood, Union Arena |
-| Pokémon Center | HTML scraping | Pokémon TCG |
 
-> **Note:** Best Buy's API only covers their first-party inventory. Pokémon TCG products on Best Buy are sold through their marketplace (third-party sellers) and are not accessible via the API.
+> **Note:** Best Buy's API only covers their first-party inventory. Pokémon TCG products on Best Buy are sold through their marketplace (third-party sellers) and are not accessible via the API. Pokémon Center is protected by Imperva bot detection and cannot be scraped server-side.
 
 ## Project structure
 
@@ -106,7 +105,7 @@ Add a new entry:
 },
 ```
 
-The admin dashboard fetches product details and availability using two Redsky endpoints per product, fetched sequentially with a 400ms delay between requests and cached for 30 minutes.
+The admin dashboard fetches product details and availability using two Redsky endpoints per product: a 200ms pause separates the two calls within each product, and a 400ms pause separates consecutive products. Results are cached for 30 minutes.
 
 ### Scraper watchlist
 For Discord alerts, edit `apps/scraper/src/products.ts`. Products require `tcin` for Target or `sku` for Best Buy.

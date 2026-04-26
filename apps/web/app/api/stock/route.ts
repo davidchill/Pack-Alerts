@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto';
+import * as cheerio from 'cheerio';
 import { NextResponse } from 'next/server';
 import { TARGET_PRODUCTS, type TargetProduct } from './target-products';
 
@@ -147,7 +148,7 @@ interface TargetFulfillmentResponse {
 }
 
 const TARGET_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
   'Accept': 'application/json',
   'Accept-Language': 'en-US,en;q=0.9',
   'Referer': 'https://www.target.com/',
@@ -178,6 +179,7 @@ async function fetchTargetProduct(product: TargetProduct): Promise<StockEntry> {
   const image = p?.item?.enrichment?.image_info?.primary_image?.url;
 
   // Fulfillment endpoint — degrade gracefully on failure
+  await delay(200);
   let inStock = false;
   try {
     const fulfillmentRes = await fetch(
@@ -335,6 +337,47 @@ export async function GET(request: Request) {
     try {
       const entry = await fetchTargetProduct(product);
       return NextResponse.json(entry);
+    } catch (err) {
+      return NextResponse.json({ error: String(err) }, { status: 500 });
+    }
+  }
+
+  // Probe a single Pokémon Center URL to test reachability and selector validity
+  // Usage: /api/stock?pc_url=https%3A%2F%2Fwww.pokemoncenter.com%2Fproduct%2F...
+  const pcUrl = searchParams.get('pc_url');
+  if (pcUrl) {
+    try {
+      const res = await fetch(pcUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.9',
+        },
+        cache: 'no-store',
+      });
+
+      const contentType = res.headers.get('content-type') ?? 'unknown';
+      const html = await res.text();
+      const $ = cheerio.load(html);
+
+      const addToCartBtns = $('button.add-to-cart');
+      const enabledAddToCart = addToCartBtns.filter((_, el) => !$(el).is(':disabled'));
+      const outOfStock = $('.product-out-of-stock, [data-outofstock="true"]');
+      const price = $('.product-price, .price').first().text().trim() || null;
+
+      return NextResponse.json({
+        httpStatus: res.status,
+        contentType,
+        htmlLength: html.length,
+        likelyBlocked: html.includes('cf-browser-verification') || html.includes('Just a moment') || html.includes('Enable JavaScript') || html.includes('Pardon Our Interruption') || html.includes('_Incapsula_Resource'),
+        selectors: {
+          addToCartTotal: addToCartBtns.length,
+          addToCartEnabled: enabledAddToCart.length,
+          outOfStock: outOfStock.length,
+          price,
+        },
+        htmlSnippet: html.slice(0, 600),
+      });
     } catch (err) {
       return NextResponse.json({ error: String(err) }, { status: 500 });
     }

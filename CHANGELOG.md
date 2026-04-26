@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.1.4 — 2026-04-26
+
+### Target bot-detection hardening
+
+- Updated `User-Agent` header from `Chrome/124` to `Chrome/136` — the stale version was a bot signal to Target's detection layer
+- Added a **200ms delay between the details and fulfillment requests** within each product fetch; previously those two calls fired back-to-back with no gap, while the 400ms pause only applied between products
+
+### Retailer probe diagnostic endpoint
+
+- Added `GET /api/stock?pc_url=<encoded-url>` — fetches any URL and returns `{ httpStatus, contentType, htmlLength, likelyBlocked, selectors, htmlSnippet }` for quickly testing whether a new retailer's product pages are scrapeable before investing in a full integration
+- `likelyBlocked` flag detects both Cloudflare (`cf-browser-verification`, `Just a moment`) and Imperva (`Pardon Our Interruption`, `_Incapsula_Resource`) challenge pages
+- Added `cheerio ^1.0.0` as a dependency to `apps/web` to power the probe's HTML parsing
+
+### Pokémon Center — confirmed unscrapeable
+
+- Tested Pokémon Center via the probe endpoint: site is protected by **Imperva** and returns a JS challenge page rather than product HTML; server-side `fetch()` cannot bypass it
+- Removed Pokémon Center from the retailer coverage table; the stub at `apps/scraper/src/retailers/pokemonCenter.ts` was never functional against the live site
+
+---
+
 ## v0.1.3 — 2026-04-26
 
 ### Admin dashboard — API Health diagnostic panel
