@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import { NextResponse } from 'next/server';
 import { TARGET_PRODUCTS, type TargetProduct } from './target-products';
 
@@ -5,6 +6,9 @@ const BESTBUY_KEY = process.env.BESTBUY_API_KEY;
 
 // Publicly known key Target's own website uses for its internal Redsky API
 const TARGET_KEY = '9f36aeafbe60771e321a7cc95a78140772ab3e96';
+
+// Stable visitor ID for this server process — Target requires this param
+const TARGET_VISITOR_ID = randomUUID().replace(/-/g, '').toUpperCase();
 
 export interface StockEntry {
   id: string;
@@ -111,33 +115,26 @@ interface TargetFulfillmentResponse {
 }
 
 const TARGET_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-  Accept: 'application/json',
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Accept': 'application/json',
+  'Accept-Language': 'en-US,en;q=0.9',
+  'Referer': 'https://www.target.com/',
+  'Origin': 'https://www.target.com',
 };
 
-// In-memory cache — avoids re-fetching all 58 products on every admin refresh
-const TARGET_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+// Cache for 30 minutes — long enough to survive multiple admin refreshes
+const TARGET_CACHE_TTL_MS = 30 * 60 * 1000;
 let targetCache: { entries: StockEntry[]; expiresAt: number } | null = null;
 
-// Runs tasks with at most `limit` in-flight at once to avoid rate-limiting
-async function withConcurrency<T>(tasks: (() => Promise<T>)[], limit: number): Promise<T[]> {
-  const results: T[] = new Array(tasks.length);
-  let next = 0;
-  async function worker() {
-    while (next < tasks.length) {
-      const i = next++;
-      results[i] = await tasks[i]();
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, worker));
-  return results;
-}
+const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 async function fetchTargetProduct(product: TargetProduct): Promise<StockEntry> {
-  const base = `?key=${TARGET_KEY}&tcin=${product.tcin}&channel=WEB&page=%2Fp%2FA-${product.tcin}`;
+  const common = `key=${TARGET_KEY}&tcin=${product.tcin}&visitor_id=${TARGET_VISITOR_ID}&channel=WEB&page=%2Fp%2FA-${product.tcin}&is_bot=false`;
 
   const detailsRes = await fetch(
-    `https://redsky.target.com/redsky_aggregations/v1/web/pdp_client_v1${base}&store_id=3991&pricing_store_id=3991`,
+    `https://redsky.target.com/redsky_aggregations/v1/web/pdp_client_v1?${common}` +
+    `&store_id=3991&pricing_store_id=3991&has_pricing_store_id=true` +
+    `&has_financing_options=true&include_obsolete=false&skip_personalized=true&skip_variation_hierarchy=true`,
     { headers: TARGET_HEADERS, cache: 'no-store' },
   );
 
@@ -148,11 +145,13 @@ async function fetchTargetProduct(product: TargetProduct): Promise<StockEntry> {
   const price = p?.price?.formatted_current_price;
   const image = p?.item?.enrichment?.image_info?.primary_image?.url;
 
-  // Fulfillment endpoint is rate-limited more aggressively — degrade gracefully on failure
+  // Fulfillment endpoint — degrade gracefully on failure
   let inStock = false;
   try {
     const fulfillmentRes = await fetch(
-      `https://redsky.target.com/redsky_aggregations/v1/web/product_fulfillment_v1${base}&store_id=1922&pricing_store_id=1922`,
+      `https://redsky.target.com/redsky_aggregations/v1/web/product_fulfillment_and_variation_hierarchy_v1?${common}` +
+      `&required_store_id=3991&store_id=3991&scheduled_delivery_store_id=3991` +
+      `&paid_membership=false&base_membership=false&card_membership=false`,
       { headers: TARGET_HEADERS, cache: 'no-store' },
     );
     if (fulfillmentRes.ok) {
@@ -182,11 +181,16 @@ async function fetchTargetProducts(): Promise<StockEntry[]> {
     return targetCache.entries;
   }
 
-  const tasks = TARGET_PRODUCTS.map((product) => async (): Promise<StockEntry> => {
+  // Sequential with a 400ms pause between each product to avoid triggering
+  // Target's bot detection — 58 products takes ~25s on a cold cache
+  const entries: StockEntry[] = [];
+  for (let i = 0; i < TARGET_PRODUCTS.length; i++) {
+    if (i > 0) await delay(400);
+    const product = TARGET_PRODUCTS[i];
     try {
-      return await fetchTargetProduct(product);
+      entries.push(await fetchTargetProduct(product));
     } catch (e) {
-      return {
+      entries.push({
         id: product.id,
         name: product.name,
         retailer: 'Target' as const,
@@ -195,12 +199,9 @@ async function fetchTargetProducts(): Promise<StockEntry[]> {
         inStock: false,
         checkedAt: new Date().toISOString(),
         error: e instanceof Error ? e.message : 'Unknown error',
-      };
+      });
     }
-  });
-
-  // Max 4 concurrent requests to avoid triggering Target's rate limiter
-  const entries = await withConcurrency(tasks, 4);
+  }
 
   targetCache = { entries, expiresAt: Date.now() + TARGET_CACHE_TTL_MS };
   return entries;
@@ -215,6 +216,20 @@ export async function GET(request: Request) {
     try {
       const products = await queryBestBuy('search=trading');
       return NextResponse.json(products.map((p) => ({ sku: p.sku, name: p.name })));
+    } catch (err) {
+      return NextResponse.json({ error: String(err) }, { status: 500 });
+    }
+  }
+
+  // Test a single Target product without warming the full cache
+  // Usage: /api/stock?target_tcin=XXXXXXXX
+  const testTcin = searchParams.get('target_tcin');
+  if (testTcin) {
+    const product = TARGET_PRODUCTS.find((p) => p.tcin === testTcin)
+      ?? { id: `target-${testTcin}`, name: testTcin, tcin: testTcin, url: `https://www.target.com/p/-/A-${testTcin}` };
+    try {
+      const entry = await fetchTargetProduct(product);
+      return NextResponse.json(entry);
     } catch (err) {
       return NextResponse.json({ error: String(err) }, { status: 500 });
     }

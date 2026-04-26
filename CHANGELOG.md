@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.1.2 — 2026-04-26
+
+### Admin dashboard
+
+- Added filter toolbar above the product table: filter by **Retailer** (All / Best Buy / Target) and **Status** (All / In Stock / Out of Stock)
+- Added **Sort** dropdown: Name A→Z, Name Z→A, Price Low→High, Price High→Low, Checked Newest, Checked Oldest
+- Filters and sort are applied client-side via `useMemo` — no extra API calls
+- Stats row (Tracking / In Stock / Out of Stock) always reflects the full unfiltered dataset
+- "Showing X of Y products" label appears when any filter is active
+- Empty state message shown when filters produce zero results
+
+### Target API hardening
+
+- Updated `pdp_client_v1` request to include all parameters Target's own site now sends: `visitor_id`, `is_bot=false`, `has_pricing_store_id=true`, `has_financing_options=true`, `include_obsolete=false`, `skip_personalized=true`, `skip_variation_hierarchy=true`
+- Updated fulfillment endpoint from deprecated `product_fulfillment_v1` to `product_fulfillment_and_variation_hierarchy_v1` with updated parameters
+- Added `Referer`, `Origin`, and `Accept-Language` headers to better match browser requests
+- Added `TARGET_VISITOR_ID` — a stable per-process random hex ID generated at startup, required by Target's API
+- Fixed `crypto.randomUUID()` global usage — now correctly imports `randomUUID` from Node's built-in `crypto` module
+- Replaced 4-concurrent-request pool with **sequential requests and a 400ms delay** between each product to avoid triggering Target's bot detection
+- Extended cache TTL from **5 minutes → 30 minutes** so a cold fetch (which now takes ~25s) only happens once every half hour
+- Added `?target_tcin=XXXXXXXX` debug endpoint to test a single Target product without triggering a full 58-product fetch
+
+---
+
 ## v0.1.1 — 2026-04-25
 
 ### Bug fixes & improvements

@@ -106,7 +106,7 @@ Add a new entry:
 },
 ```
 
-The admin dashboard fetches product details and availability using two Redsky endpoints per product, throttled to 4 concurrent requests and cached for 5 minutes.
+The admin dashboard fetches product details and availability using two Redsky endpoints per product, fetched sequentially with a 400ms delay between requests and cached for 30 minutes.
 
 ### Scraper watchlist
 For Discord alerts, edit `apps/scraper/src/products.ts`. Products require `tcin` for Target or `sku` for Best Buy.
