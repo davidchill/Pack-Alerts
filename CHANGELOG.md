@@ -1,5 +1,38 @@
 # Changelog
 
+## v0.1.1 — 2026-04-25
+
+### Bug fixes & improvements
+
+#### Target API overhaul
+- Fixed incorrect placeholder TCIN (`92831234`) for Surging Sparks ETB — replaced with real TCIN `91619922`
+- Fixed empty `pricing_store_id` parameter causing hard GraphQL validation errors from Redsky (`Variable 'pricing_store_id' has coerced Null value for NonNull type 'String!'`)
+- Split into two Redsky endpoints: `pdp_client_v1` (store `3991`) for price and image, `product_fulfillment_v1` (store `1922`) for availability status — the single endpoint never returned both
+- Fixed incorrect JSON paths: images now read from `item.enrichment.image_info.primary_image.url` (was `item.enrichment.images.primary_image_url`), availability from `item` path corrected
+- Fulfillment endpoint failures (e.g. 403 rate-limit) now degrade gracefully — products show as Out of Stock instead of "Error"
+- Added concurrency limiter (max 4 simultaneous requests) to prevent rate-limiting from the Redsky API
+- Added in-memory cache with 5-minute TTL so admin page refreshes don't re-fetch all products on every load
+- Same fixes applied to `apps/scraper/src/retailers/target.ts`
+
+#### Target product list expanded (`target-products.ts`)
+- Expanded from 1 Pokémon-only entry to 58 products across 8 TCG brands
+- Added: Pokémon TCG (Destined Rivals, Journey Together, White Flare, Prismatic Evolutions, Surging Sparks, Mega Evolutions Ascended Heroes — ETBs, booster bundles, individual booster packs, Super-Premium Collection)
+- Added: Magic: The Gathering (Final Fantasy Collector + Display + Pack Lots, Tarkir Dragonstorm Collector Booster, Foundations Collector + Bundle + Jumpstart)
+- Added: Yu-Gi-Oh! (2025 Mega Pack Tin)
+- Added: One Piece Card Game (OP-09 through OP-15, EB-02, Treasure Booster Set)
+- Added: Disney Lorcana (Archazia's Island, Azurite Sea, Shimmering Skies, Ursula's Return, Into The Inklands — display boxes, single packs, starter decks, Illumineer's Troves)
+- Added: Star Wars: Unlimited (2025 Gift Box)
+- Added: Digimon Card Game (Adventure Box 2 & 3)
+- Added: Dragon Ball Super Card Game (Fusion World FB02/FB05/FB06/FB07, Bardock FS05 Starter Deck)
+- Added: Flesh and Blood (Dynasty, Welcome to Rathe, Everfest)
+- Added: Union Arena (Solo Leveling, Bleach Starter Deck)
+- All TCINs verified live against Target's API before adding; 12 dead TCINs excluded
+
+#### Admin dashboard
+- Added `suppressHydrationWarning` to `<body>` in root layout to suppress false-positive React hydration errors caused by browser extensions (Grammarly, etc.) injecting attributes into the DOM
+
+---
+
 ## v0.1.0 — 2026-04-25
 
 ### Initial release

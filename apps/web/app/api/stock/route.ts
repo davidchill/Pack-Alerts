@@ -85,24 +85,14 @@ async function fetchBestBuyProducts(): Promise<StockEntry[]> {
 
 // ─── Target ──────────────────────────────────────────────────────────────────
 
-interface TargetApiResponse {
+interface TargetDetailsResponse {
   data?: {
     product?: {
-      fulfillment?: {
-        shipping_options?: {
-          availability_status?: string;
-        };
-      };
-      price?: {
-        formatted_current_price?: string;
-      };
+      price?: { formatted_current_price?: string };
       item?: {
-        product_description?: {
-          title?: string;
-        };
         enrichment?: {
-          images?: {
-            primary_image_url?: string;
+          image_info?: {
+            primary_image?: { url?: string };
           };
         };
       };
@@ -110,28 +100,69 @@ interface TargetApiResponse {
   };
 }
 
+interface TargetFulfillmentResponse {
+  data?: {
+    product?: {
+      fulfillment?: {
+        shipping_options?: { availability_status?: string };
+      };
+    };
+  };
+}
+
+const TARGET_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+  Accept: 'application/json',
+};
+
+// In-memory cache — avoids re-fetching all 58 products on every admin refresh
+const TARGET_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+let targetCache: { entries: StockEntry[]; expiresAt: number } | null = null;
+
+// Runs tasks with at most `limit` in-flight at once to avoid rate-limiting
+async function withConcurrency<T>(tasks: (() => Promise<T>)[], limit: number): Promise<T[]> {
+  const results: T[] = new Array(tasks.length);
+  let next = 0;
+  async function worker() {
+    while (next < tasks.length) {
+      const i = next++;
+      results[i] = await tasks[i]();
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, worker));
+  return results;
+}
+
 async function fetchTargetProduct(product: TargetProduct): Promise<StockEntry> {
-  const url =
-    `https://redsky.target.com/redsky_aggregations/v1/web/pdp_client_v1` +
-    `?key=${TARGET_KEY}&tcin=${product.tcin}&store_id=&pricing_store_id=` +
-    `&visitor_id=&channel=WEB&page=%2Fp%2FA-${product.tcin}`;
+  const base = `?key=${TARGET_KEY}&tcin=${product.tcin}&channel=WEB&page=%2Fp%2FA-${product.tcin}`;
 
-  const res = await fetch(url, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-      Accept: 'application/json',
-    },
-    cache: 'no-store',
-  });
+  const detailsRes = await fetch(
+    `https://redsky.target.com/redsky_aggregations/v1/web/pdp_client_v1${base}&store_id=3991&pricing_store_id=3991`,
+    { headers: TARGET_HEADERS, cache: 'no-store' },
+  );
 
-  if (!res.ok) throw new Error(`Target API returned ${res.status}`);
+  if (!detailsRes.ok) throw new Error(`Target API returned ${detailsRes.status}`);
 
-  const data: TargetApiResponse = await res.json();
-  const p = data?.data?.product;
-  const status = p?.fulfillment?.shipping_options?.availability_status;
-  const inStock = status === 'IN_STOCK' || status === 'AVAILABLE';
+  const details: TargetDetailsResponse = await detailsRes.json();
+  const p = details?.data?.product;
   const price = p?.price?.formatted_current_price;
-  const image = p?.item?.enrichment?.images?.primary_image_url;
+  const image = p?.item?.enrichment?.image_info?.primary_image?.url;
+
+  // Fulfillment endpoint is rate-limited more aggressively — degrade gracefully on failure
+  let inStock = false;
+  try {
+    const fulfillmentRes = await fetch(
+      `https://redsky.target.com/redsky_aggregations/v1/web/product_fulfillment_v1${base}&store_id=1922&pricing_store_id=1922`,
+      { headers: TARGET_HEADERS, cache: 'no-store' },
+    );
+    if (fulfillmentRes.ok) {
+      const fulfillment: TargetFulfillmentResponse = await fulfillmentRes.json();
+      const status = fulfillment?.data?.product?.fulfillment?.shipping_options?.availability_status;
+      inStock = status === 'IN_STOCK' || status === 'AVAILABLE';
+    }
+  } catch {
+    // fulfillment unavailable — inStock stays false
+  }
 
   return {
     id: product.id,
@@ -147,20 +178,32 @@ async function fetchTargetProduct(product: TargetProduct): Promise<StockEntry> {
 }
 
 async function fetchTargetProducts(): Promise<StockEntry[]> {
-  const results = await Promise.allSettled(TARGET_PRODUCTS.map(fetchTargetProduct));
-  return results.map((r, i) => {
-    if (r.status === 'fulfilled') return r.value;
-    return {
-      id: TARGET_PRODUCTS[i].id,
-      name: TARGET_PRODUCTS[i].name,
-      retailer: 'Target' as const,
-      sku: TARGET_PRODUCTS[i].tcin,
-      url: TARGET_PRODUCTS[i].url,
-      inStock: false,
-      checkedAt: new Date().toISOString(),
-      error: r.reason instanceof Error ? r.reason.message : 'Unknown error',
-    };
+  if (targetCache && Date.now() < targetCache.expiresAt) {
+    return targetCache.entries;
+  }
+
+  const tasks = TARGET_PRODUCTS.map((product) => async (): Promise<StockEntry> => {
+    try {
+      return await fetchTargetProduct(product);
+    } catch (e) {
+      return {
+        id: product.id,
+        name: product.name,
+        retailer: 'Target' as const,
+        sku: product.tcin,
+        url: product.url,
+        inStock: false,
+        checkedAt: new Date().toISOString(),
+        error: e instanceof Error ? e.message : 'Unknown error',
+      };
+    }
   });
+
+  // Max 4 concurrent requests to avoid triggering Target's rate limiter
+  const entries = await withConcurrency(tasks, 4);
+
+  targetCache = { entries, expiresAt: Date.now() + TARGET_CACHE_TTL_MS };
+  return entries;
 }
 
 // ─── Combined handler ────────────────────────────────────────────────────────

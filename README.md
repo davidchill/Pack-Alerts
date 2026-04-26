@@ -13,7 +13,7 @@ A private admin dashboard lets you see live stock status across all tracked prod
 | Retailer | Method | Games |
 |---|---|---|
 | Best Buy | Official developer API | Lorcana, Star Wars Unlimited, Cardsmiths, and other first-party TCG products |
-| Target | Internal Redsky API | Pokémon TCG |
+| Target | Internal Redsky API (curated TCIN list) | Pokémon TCG, Magic: The Gathering, Yu-Gi-Oh!, One Piece, Disney Lorcana, Star Wars Unlimited, Digimon, Dragon Ball Super, Flesh and Blood, Union Arena |
 | Pokémon Center | HTML scraping | Pokémon TCG |
 
 > **Note:** Best Buy's API only covers their first-party inventory. Pokémon TCG products on Best Buy are sold through their marketplace (third-party sellers) and are not accessible via the API.
@@ -87,24 +87,26 @@ npm run check-stock
 ### Best Buy (Lorcana, Star Wars Unlimited, etc.)
 Best Buy products are discovered automatically via the API — no manual SKU entry needed. The route filters for game TCG products and excludes sports cards and accessories.
 
-### Target (Pokémon TCG)
+### Target (all TCGs)
 Edit `apps/web/app/api/stock/target-products.ts`. Find the TCIN in the Target product URL:
 
 ```
-https://www.target.com/p/product-name/-/A-92831234
+https://www.target.com/p/product-name/-/A-91619922
                                              ^^^^^^^^
-                                             TCIN = 92831234
+                                             TCIN = 91619922
 ```
 
 Add a new entry:
 ```ts
 {
-  id: 'target-prismatic-evolutions-etb',
-  name: 'Pokémon TCG: Prismatic Evolutions Elite Trainer Box',
-  tcin: '12345678',
-  url: 'https://www.target.com/p/-/A-12345678',
+  id: 'target-my-product',
+  name: 'My TCG Product Name',
+  tcin: '91619922',
+  url: 'https://www.target.com/p/product-name/-/A-91619922',
 },
 ```
+
+The admin dashboard fetches product details and availability using two Redsky endpoints per product, throttled to 4 concurrent requests and cached for 5 minutes.
 
 ### Scraper watchlist
 For Discord alerts, edit `apps/scraper/src/products.ts`. Products require `tcin` for Target or `sku` for Best Buy.
