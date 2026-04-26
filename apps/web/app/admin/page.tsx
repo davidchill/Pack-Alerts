@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
+import type { DiagnosticMeta, RetailerDiagnostic } from '../api/stock/route';
 
 interface StockEntry {
   id: string;
@@ -29,6 +30,213 @@ function parsePrice(price?: string): number {
   const n = parseFloat(price.replace(/[^0-9.]/g, ''));
   return isNaN(n) ? Infinity : n;
 }
+
+function fmtTime(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+function fmtDuration(ms: number): string {
+  const m = Math.floor(ms / 60000);
+  const s = Math.floor((ms % 60000) / 1000);
+  if (m > 0) return s > 0 ? `${m}m ${s}s` : `${m}m`;
+  return `${s}s`;
+}
+
+// ─── Diagnostic panel ─────────────────────────────────────────────────────────
+
+const STATUS_DOT: Record<string, string> = {
+  ok:       'bg-[#00ff88]',
+  degraded: 'bg-amber-400',
+  error:    'bg-red-500',
+};
+
+const STATUS_BADGE: Record<string, string> = {
+  ok:       'bg-[#00ff88]/10 text-[#00ff88] border-[#00ff88]/30',
+  degraded: 'bg-amber-400/10 text-amber-400 border-amber-400/30',
+  error:    'bg-red-500/10 text-red-400 border-red-500/30',
+};
+
+const STATUS_LABEL: Record<string, string> = {
+  ok:       'Healthy',
+  degraded: 'Degraded',
+  error:    'Error',
+};
+
+function RetailerRow({
+  diag,
+  targetCache,
+  apiKeyPresent,
+}: {
+  diag: RetailerDiagnostic;
+  targetCache: DiagnosticMeta['targetCache'];
+  apiKeyPresent: boolean;
+}) {
+  const showWarning = diag.blockedSignal || diag.rateLimitSignal || diag.status === 'error';
+
+  return (
+    <div className="px-6 py-4 border-b border-[#1e1e2e] last:border-0">
+      {/* Main metric row */}
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+
+        {/* Status dot + retailer name */}
+        <div className="flex items-center gap-2 min-w-[110px]">
+          <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${STATUS_DOT[diag.status]}`} />
+          <span className="font-semibold text-sm text-white">{diag.retailer}</span>
+        </div>
+
+        {/* Status badge */}
+        <span className={`text-xs font-bold px-2 py-0.5 rounded border ${STATUS_BADGE[diag.status]}`}>
+          {STATUS_LABEL[diag.status]}
+        </span>
+
+        {/* Fetched / tracked */}
+        <span className="text-xs text-gray-400">
+          {diag.tracked !== null
+            ? `${diag.fetched} / ${diag.tracked} products`
+            : `${diag.fetched} products`}
+        </span>
+
+        {/* Error count */}
+        {diag.errored > 0 && (
+          <span className="text-xs text-red-400 font-medium">
+            {diag.errored} {diag.errored === 1 ? 'error' : 'errors'}
+          </span>
+        )}
+
+        {/* Response time */}
+        {diag.responseTimeMs !== null && (
+          <span className="text-xs text-gray-500">
+            {diag.retailer === 'Target' && targetCache.wasHit
+              ? `cache hit · ${fmtTime(diag.responseTimeMs)}`
+              : fmtTime(diag.responseTimeMs)}
+          </span>
+        )}
+
+        {/* HTTP error codes */}
+        {diag.httpCodes.map((code) => (
+          <span
+            key={code}
+            className="text-xs font-mono bg-red-900/30 text-red-400 border border-red-500/30 rounded px-1.5 py-0.5"
+          >
+            HTTP {code}
+          </span>
+        ))}
+
+        {/* Target cache status */}
+        {diag.retailer === 'Target' && (
+          <span className={`text-xs ml-auto ${targetCache.warm ? 'text-[#00ff88]/70' : 'text-gray-600'}`}>
+            {targetCache.warm && targetCache.expiresAt
+              ? `Cache warm · expires in ${fmtDuration(new Date(targetCache.expiresAt).getTime() - Date.now())}`
+              : targetCache.warm
+              ? 'Cache warm'
+              : 'Cache cold'}
+          </span>
+        )}
+
+        {/* Best Buy API key status */}
+        {diag.retailer === 'Best Buy' && (
+          <span className={`text-xs ml-auto ${apiKeyPresent ? 'text-gray-600' : 'text-red-400 font-bold'}`}>
+            {apiKeyPresent ? 'API key present' : 'API KEY MISSING'}
+          </span>
+        )}
+      </div>
+
+      {/* Warning / error detail sub-row */}
+      {showWarning && (
+        <div className="mt-3 flex items-start gap-2">
+          <span className="text-amber-400 mt-0.5 shrink-0">⚠</span>
+          <div className="space-y-1">
+            {diag.blockedSignal && (
+              <p className="text-xs font-semibold text-amber-400">
+                Possible IP block — HTTP 403 responses detected. Target may have flagged this server&apos;s IP.
+              </p>
+            )}
+            {diag.rateLimitSignal && (
+              <p className="text-xs font-semibold text-amber-400">
+                Rate limited — HTTP 429 responses detected. Reduce refresh frequency.
+              </p>
+            )}
+            {!diag.blockedSignal && !diag.rateLimitSignal && diag.status === 'error' && diag.errorSample && (
+              <p className="text-xs font-semibold text-red-400">
+                {diag.retailer === 'Best Buy' && !apiKeyPresent
+                  ? 'API key is missing or invalid.'
+                  : 'Retailer API unavailable.'}
+              </p>
+            )}
+            {diag.errorSample && (
+              <p className="text-xs font-mono text-gray-500 break-all">{diag.errorSample}</p>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DiagnosticPanel({
+  meta,
+  loading,
+}: {
+  meta: DiagnosticMeta | null;
+  loading: boolean;
+}) {
+  const overallStatus = meta
+    ? meta.retailers.some((r) => r.status === 'error' || r.blockedSignal || r.rateLimitSignal)
+      ? 'error'
+      : meta.retailers.some((r) => r.status === 'degraded')
+      ? 'degraded'
+      : 'ok'
+    : null;
+
+  return (
+    <div className="mb-8 bg-[#12121a] border border-[#1e1e2e] rounded-2xl overflow-hidden">
+      {/* Panel header */}
+      <div className="flex items-center justify-between px-6 py-3 border-b border-[#1e1e2e] bg-[#0f0f18]">
+        <div className="flex items-center gap-3">
+          <span className="text-xs font-semibold uppercase tracking-widest text-gray-400">
+            API Health
+          </span>
+          {overallStatus && (
+            <span className={`text-xs font-bold px-2 py-0.5 rounded border ${STATUS_BADGE[overallStatus]}`}>
+              {overallStatus === 'ok' ? 'All Systems OK' : overallStatus === 'degraded' ? 'Degraded' : 'Issues Detected'}
+            </span>
+          )}
+        </div>
+        {meta && (
+          <span className="text-xs text-gray-600">
+            as of {new Date(meta.generatedAt).toLocaleTimeString()}
+          </span>
+        )}
+      </div>
+
+      {/* Loading state */}
+      {loading && !meta && (
+        <div className="px-6 py-5 space-y-3">
+          {['Best Buy', 'Target'].map((r) => (
+            <div key={r} className="flex items-center gap-4">
+              <span className="w-2.5 h-2.5 rounded-full bg-[#1e1e2e] animate-pulse" />
+              <span className="text-sm text-gray-600">{r}</span>
+              <span className="text-xs text-gray-700 animate-pulse">Checking...</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Retailer rows */}
+      {meta && meta.retailers.map((diag) => (
+        <RetailerRow
+          key={diag.retailer}
+          diag={diag}
+          targetCache={meta.targetCache}
+          apiKeyPresent={meta.apiKeyPresent.bestBuy}
+        />
+      ))}
+    </div>
+  );
+}
+
+// ─── Filter / Sort controls ───────────────────────────────────────────────────
 
 function FilterGroup<T extends string>({
   label,
@@ -96,15 +304,35 @@ function SortSelect({
   );
 }
 
+// ─── Page ─────────────────────────────────────────────────────────────────────
+
 export default function AdminPage() {
   const [entries, setEntries] = useState<StockEntry[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [meta, setMeta] = useState<DiagnosticMeta | null>(null);
+  const [loading, setLoading] = useState(false);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
+  const [dataIsStale, setDataIsStale] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
 
   const [retailerFilter, setRetailerFilter] = useState<RetailerFilter>('All');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('All');
   const [sortKey, setSortKey] = useState<SortKey>('name-asc');
+
+  const CACHE_KEY = 'packalerts-admin-snapshot';
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(CACHE_KEY);
+      if (!saved) return;
+      const { entries: e, meta: m, lastRefresh: ts } = JSON.parse(saved);
+      setEntries(e);
+      setMeta(m);
+      setLastRefresh(new Date(ts));
+      setDataIsStale(true);
+    } catch {
+      // corrupt or missing — ignore
+    }
+  }, []);
 
   async function fetchStock() {
     setLoading(true);
@@ -115,8 +343,16 @@ export default function AdminPage() {
       if (!res.ok) {
         setFetchError(data.error ?? 'API request failed');
       } else {
-        setEntries(data);
-        setLastRefresh(new Date());
+        const ts = new Date();
+        setEntries(data.entries ?? data);
+        setMeta(data.meta ?? null);
+        setLastRefresh(ts);
+        setDataIsStale(false);
+        localStorage.setItem(CACHE_KEY, JSON.stringify({
+          entries: data.entries ?? data,
+          meta: data.meta ?? null,
+          lastRefresh: ts.toISOString(),
+        }));
       }
     } catch (e) {
       setFetchError(e instanceof Error ? e.message : 'Unknown error');
@@ -124,10 +360,6 @@ export default function AdminPage() {
       setLoading(false);
     }
   }
-
-  useEffect(() => {
-    fetchStock();
-  }, []);
 
   const inStockCount = entries.filter((e) => e.inStock).length;
 
@@ -171,7 +403,8 @@ export default function AdminPage() {
             </h1>
             {lastRefresh && (
               <p className="text-xs text-gray-500 mt-1">
-                Last checked: {lastRefresh.toLocaleTimeString()}
+                Last checked: {lastRefresh.toLocaleString()}
+                {dataIsStale && <span className="ml-2 text-gray-600">(cached)</span>}
               </p>
             )}
           </div>
@@ -183,6 +416,16 @@ export default function AdminPage() {
             {loading ? 'Checking...' : 'Refresh'}
           </button>
         </div>
+
+        {/* Diagnostic panel */}
+        <DiagnosticPanel meta={meta} loading={loading} />
+
+        {/* Network-level error banner (can't reach /api/stock at all) */}
+        {fetchError && (
+          <div className="mb-6 bg-red-900/30 border border-red-500/40 rounded-xl px-6 py-4 text-red-400 text-sm">
+            <span className="font-bold">Network error: </span>{fetchError}
+          </div>
+        )}
 
         {/* Stats row */}
         {!loading && entries.length > 0 && (
@@ -199,13 +442,6 @@ export default function AdminPage() {
               <p className="text-xs text-gray-500 uppercase tracking-widest mb-1">Out of Stock</p>
               <p className="text-2xl font-black text-gray-400">{entries.length - inStockCount}</p>
             </div>
-          </div>
-        )}
-
-        {/* Error banner */}
-        {fetchError && (
-          <div className="mb-6 bg-red-900/30 border border-red-500/40 rounded-xl px-6 py-4 text-red-400 text-sm">
-            <span className="font-bold">API error: </span>{fetchError}
           </div>
         )}
 
@@ -238,7 +474,11 @@ export default function AdminPage() {
         )}
 
         {/* Table */}
-        {loading && entries.length === 0 ? (
+        {!loading && entries.length === 0 && !fetchError ? (
+          <div className="text-center text-gray-500 py-24">
+            <p className="text-sm">No data yet — click <span className="text-white font-semibold">Refresh</span> to check stock.</p>
+          </div>
+        ) : loading && entries.length === 0 ? (
           <div className="text-center text-gray-500 py-24">Fetching stock data...</div>
         ) : (
           <div className="bg-[#12121a] border border-[#1e1e2e] rounded-2xl overflow-hidden">

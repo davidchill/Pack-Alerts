@@ -1,5 +1,43 @@
 # Changelog
 
+## v0.1.3 — 2026-04-26
+
+### Admin dashboard — API Health diagnostic panel
+
+- Added `DiagnosticPanel` component that appears at the top of `/admin`, above the stats row
+- Displays a per-retailer health summary (Best Buy and Target) with: status badge (Healthy / Degraded / Error), products fetched vs. total tracked, error count, response time, and any HTTP error codes seen as inline badges
+- Detects and flags **IP block signals** (HTTP 403) and **rate-limit signals** (HTTP 429) with amber warning text and the raw error message in monospace
+- Flags Best Buy API key missing/present inline on the Best Buy row
+- Shows Target cache state inline: "Cache warm · expires in Xm" or "Cache cold", and marks fast responses as "cache hit · Xms"
+- Overall rollup badge in the panel header: "All Systems OK", "Degraded", or "Issues Detected"
+- Panel shows a pulsing skeleton per-retailer while a refresh is in flight
+
+### API route (`apps/web/app/api/stock/route.ts`)
+
+- Response shape changed from `StockEntry[]` → `{ entries: StockEntry[], meta: DiagnosticMeta }` — frontend handles both shapes defensively
+- Added `withTiming()` helper that wraps each retailer fetch and records wall-clock milliseconds
+- Added `buildRetailerDiagnostic()` which extracts HTTP status codes from error strings via regex, computes `ok / degraded / error` status (degraded = <50% errored, error = ≥50%), and sets `blockedSignal` / `rateLimitSignal` flags
+- `targetCache` object now tracks `fetchedAt` timestamp; `cacheWasWarm` is captured before the fetch so `wasHit` correctly distinguishes a cache hit from a freshly populated cache
+- Exported `RetailerDiagnostic`, `DiagnosticMeta`, and `ApiResponse` interfaces for use in the frontend
+
+### Admin dashboard — manual-only refresh
+
+- Removed `useEffect` auto-fetch on page load; the dashboard now starts idle and only calls the API when the **Refresh** button is clicked
+- Idle state shows "No data yet — click Refresh to check stock" instead of a blank table
+
+### Admin dashboard — persistent cached data via `localStorage`
+
+- After every successful refresh, the full snapshot (`entries`, `meta`, `lastRefresh`) is saved to `localStorage` under the key `packalerts-admin-snapshot`
+- On page load a `useEffect` reads the snapshot and populates the dashboard immediately — no API call, no blank page
+- Timestamp switches from `toLocaleTimeString()` to `toLocaleString()` (full date + time) so a cached snapshot from a previous day is obviously identifiable
+- A `(cached)` label appears next to the timestamp when displaying stored data; it disappears after a live refresh
+
+### Bug fix — React hydration warning
+
+- Added `suppressHydrationWarning` to `<html>` in `apps/web/app/layout.tsx` to suppress false-positive hydration mismatch errors caused by browser extensions (e.g. Redeviation) injecting attributes onto the `<html>` element before React hydrates
+
+---
+
 ## v0.1.2 — 2026-04-26
 
 ### Admin dashboard

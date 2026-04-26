@@ -10,6 +10,8 @@ const TARGET_KEY = '9f36aeafbe60771e321a7cc95a78140772ab3e96';
 // Stable visitor ID for this server process — Target requires this param
 const TARGET_VISITOR_ID = randomUUID().replace(/-/g, '').toUpperCase();
 
+// ─── Shared types ─────────────────────────────────────────────────────────────
+
 export interface StockEntry {
   id: string;
   name: string;
@@ -23,7 +25,37 @@ export interface StockEntry {
   error?: string;
 }
 
-// ─── Best Buy ────────────────────────────────────────────────────────────────
+export interface RetailerDiagnostic {
+  retailer: 'Best Buy' | 'Target';
+  status: 'ok' | 'degraded' | 'error';
+  fetched: number;
+  errored: number;
+  tracked: number | null;     // known total being tracked (null = dynamic/unknown)
+  responseTimeMs: number | null;
+  httpCodes: number[];        // distinct HTTP error codes seen (e.g. [403, 429])
+  blockedSignal: boolean;     // 403 detected
+  rateLimitSignal: boolean;   // 429 detected
+  errorSample: string | null; // first error message for display
+}
+
+export interface DiagnosticMeta {
+  generatedAt: string;
+  retailers: RetailerDiagnostic[];
+  targetCache: {
+    warm: boolean;
+    wasHit: boolean;          // true = response came from cache (no live fetch)
+    expiresAt: string | null;
+    ageMs: number | null;
+  };
+  apiKeyPresent: { bestBuy: boolean };
+}
+
+export interface ApiResponse {
+  entries: StockEntry[];
+  meta: DiagnosticMeta;
+}
+
+// ─── Best Buy ─────────────────────────────────────────────────────────────────
 
 interface BestBuyProduct {
   sku: number;
@@ -87,7 +119,7 @@ async function fetchBestBuyProducts(): Promise<StockEntry[]> {
   }));
 }
 
-// ─── Target ──────────────────────────────────────────────────────────────────
+// ─── Target ───────────────────────────────────────────────────────────────────
 
 interface TargetDetailsResponse {
   data?: {
@@ -124,7 +156,7 @@ const TARGET_HEADERS = {
 
 // Cache for 30 minutes — long enough to survive multiple admin refreshes
 const TARGET_CACHE_TTL_MS = 30 * 60 * 1000;
-let targetCache: { entries: StockEntry[]; expiresAt: number } | null = null;
+let targetCache: { entries: StockEntry[]; expiresAt: number; fetchedAt: number } | null = null;
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -203,11 +235,84 @@ async function fetchTargetProducts(): Promise<StockEntry[]> {
     }
   }
 
-  targetCache = { entries, expiresAt: Date.now() + TARGET_CACHE_TTL_MS };
+  const now = Date.now();
+  targetCache = { entries, expiresAt: now + TARGET_CACHE_TTL_MS, fetchedAt: now };
   return entries;
 }
 
-// ─── Combined handler ────────────────────────────────────────────────────────
+// ─── Diagnostics ──────────────────────────────────────────────────────────────
+
+interface TimedResult {
+  entries: StockEntry[];
+  ms: number;
+}
+
+async function withTiming(fn: () => Promise<StockEntry[]>): Promise<TimedResult> {
+  const start = Date.now();
+  const entries = await fn();
+  return { entries, ms: Date.now() - start };
+}
+
+function buildRetailerDiagnostic(
+  retailer: 'Best Buy' | 'Target',
+  result: PromiseSettledResult<TimedResult>,
+  trackedCount?: number,
+): RetailerDiagnostic {
+  if (result.status === 'rejected') {
+    const msg = String(result.reason);
+    const match = msg.match(/\b(\d{3})\b/);
+    const code = match ? parseInt(match[1]) : null;
+    return {
+      retailer,
+      status: 'error',
+      fetched: 0,
+      errored: 0,
+      tracked: trackedCount ?? null,
+      responseTimeMs: null,
+      httpCodes: code ? [code] : [],
+      blockedSignal: code === 403,
+      rateLimitSignal: code === 429,
+      errorSample: msg,
+    };
+  }
+
+  const { entries, ms } = result.value;
+  const erroredEntries = entries.filter((e) => e.error);
+  const fetched = entries.length - erroredEntries.length;
+
+  const httpCodes: number[] = [];
+  for (const e of erroredEntries) {
+    const match = e.error?.match(/\b(\d{3})\b/);
+    if (match) {
+      const code = parseInt(match[1]);
+      if (!httpCodes.includes(code)) httpCodes.push(code);
+    }
+  }
+
+  let status: 'ok' | 'degraded' | 'error';
+  if (erroredEntries.length === 0) {
+    status = 'ok';
+  } else if (erroredEntries.length >= entries.length / 2) {
+    status = 'error';
+  } else {
+    status = 'degraded';
+  }
+
+  return {
+    retailer,
+    status,
+    fetched,
+    errored: erroredEntries.length,
+    tracked: trackedCount ?? null,
+    responseTimeMs: ms,
+    httpCodes,
+    blockedSignal: httpCodes.includes(403),
+    rateLimitSignal: httpCodes.includes(429),
+    errorSample: erroredEntries[0]?.error ?? null,
+  };
+}
+
+// ─── Combined handler ─────────────────────────────────────────────────────────
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -235,23 +340,35 @@ export async function GET(request: Request) {
     }
   }
 
-  const [bbResults, targetResults] = await Promise.allSettled([
-    fetchBestBuyProducts(),
-    fetchTargetProducts(),
+  // Snapshot cache state BEFORE fetching — determines wasHit after the await
+  const cacheWasWarm = targetCache !== null && Date.now() < targetCache.expiresAt;
+
+  const [bbResult, targetResult] = await Promise.allSettled([
+    withTiming(fetchBestBuyProducts),
+    withTiming(fetchTargetProducts),
   ]);
 
   const entries: StockEntry[] = [
-    ...(bbResults.status === 'fulfilled' ? bbResults.value : []),
-    ...(targetResults.status === 'fulfilled' ? targetResults.value : []),
+    ...(bbResult.status === 'fulfilled' ? bbResult.value.entries : []),
+    ...(targetResult.status === 'fulfilled' ? targetResult.value.entries : []),
   ];
 
-  const errors: string[] = [];
-  if (bbResults.status === 'rejected') errors.push(`Best Buy: ${bbResults.reason}`);
-  if (targetResults.status === 'rejected') errors.push(`Target: ${targetResults.reason}`);
+  const now = Date.now();
 
-  if (entries.length === 0 && errors.length > 0) {
-    return NextResponse.json({ error: errors.join(' | ') }, { status: 500 });
-  }
+  const meta: DiagnosticMeta = {
+    generatedAt: new Date(now).toISOString(),
+    retailers: [
+      buildRetailerDiagnostic('Best Buy', bbResult),
+      buildRetailerDiagnostic('Target', targetResult, TARGET_PRODUCTS.length),
+    ],
+    targetCache: {
+      warm: targetCache !== null && now < targetCache.expiresAt,
+      wasHit: cacheWasWarm,
+      expiresAt: targetCache ? new Date(targetCache.expiresAt).toISOString() : null,
+      ageMs: targetCache ? now - targetCache.fetchedAt : null,
+    },
+    apiKeyPresent: { bestBuy: !!BESTBUY_KEY },
+  };
 
-  return NextResponse.json(entries);
+  return NextResponse.json({ entries, meta });
 }

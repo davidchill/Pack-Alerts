@@ -6,7 +6,7 @@ Real-time TCG restock alerts delivered to Discord. Monitors multiple retailers a
 
 PackAlert checks product pages across major TCG retailers on a schedule. The instant a product flips from out-of-stock to available, a Discord notification fires with the product name, retailer, price, and a direct buy link.
 
-A private admin dashboard lets you see live stock status across all tracked products.
+A private `/admin` dashboard shows live stock status across all tracked products, with an API health panel that surfaces per-retailer status, response times, error counts, and IP block / rate-limit signals. Data is persisted in `localStorage` so the dashboard loads instantly on page reload with the last known state; the Refresh button triggers a live API check on demand.
 
 ## Retailers & games covered
 
