@@ -6,7 +6,7 @@ import type { DiagnosticMeta, RetailerDiagnostic } from '../api/stock/route';
 interface StockEntry {
   id: string;
   name: string;
-  retailer: 'Best Buy' | 'Target';
+  retailer: 'Best Buy' | 'Target' | 'Walmart';
   sku: string;
   url: string;
   image?: string;
@@ -16,13 +16,14 @@ interface StockEntry {
   error?: string;
 }
 
-type RetailerFilter = 'All' | 'Best Buy' | 'Target';
+type RetailerFilter = 'All' | 'Best Buy' | 'Target' | 'Walmart';
 type StatusFilter = 'All' | 'In Stock' | 'Out of Stock';
 type SortKey = 'name-asc' | 'name-desc' | 'price-asc' | 'price-desc' | 'checked-desc' | 'checked-asc';
 
 const RETAILER_STYLES: Record<string, string> = {
   'Best Buy': 'bg-blue-500/15 text-blue-400 border-blue-500/30',
   'Target':   'bg-red-500/15 text-red-400 border-red-500/30',
+  'Walmart':  'bg-[#0071ce]/15 text-[#0071ce] border-[#0071ce]/30',
 };
 
 function parsePrice(price?: string): number {
@@ -66,13 +67,15 @@ const STATUS_LABEL: Record<string, string> = {
 function RetailerRow({
   diag,
   targetCache,
+  walmartCache,
   apiKeyPresent,
 }: {
   diag: RetailerDiagnostic;
   targetCache: DiagnosticMeta['targetCache'];
+  walmartCache: DiagnosticMeta['walmartCache'];
   apiKeyPresent: boolean;
 }) {
-  const showWarning = diag.blockedSignal || diag.rateLimitSignal || diag.status === 'error';
+  const showWarning = diag.blockedSignal || diag.rateLimitSignal || diag.botDetectSignal || diag.status === 'error';
 
   return (
     <div className="px-6 py-4 border-b border-[#1e1e2e] last:border-0">
@@ -134,6 +137,17 @@ function RetailerRow({
           </span>
         )}
 
+        {/* Walmart cache status */}
+        {diag.retailer === 'Walmart' && (
+          <span className={`text-xs ml-auto ${walmartCache.warm ? 'text-[#00ff88]/70' : 'text-gray-600'}`}>
+            {walmartCache.warm && walmartCache.expiresAt
+              ? `Cache warm · expires in ${fmtDuration(new Date(walmartCache.expiresAt).getTime() - Date.now())}`
+              : walmartCache.warm
+              ? 'Cache warm'
+              : 'Cache cold'}
+          </span>
+        )}
+
         {/* Best Buy API key status */}
         {diag.retailer === 'Best Buy' && (
           <span className={`text-xs ml-auto ${apiKeyPresent ? 'text-gray-600' : 'text-red-400 font-bold'}`}>
@@ -157,7 +171,12 @@ function RetailerRow({
                 Rate limited — HTTP 429 responses detected. Reduce refresh frequency.
               </p>
             )}
-            {!diag.blockedSignal && !diag.rateLimitSignal && diag.status === 'error' && diag.errorSample && (
+            {diag.botDetectSignal && (
+              <p className="text-xs font-semibold text-amber-400">
+                Bot detection triggered — Walmart returned a challenge page. Try refreshing; persistent failures may require a different User-Agent or longer delay between requests.
+              </p>
+            )}
+            {!diag.blockedSignal && !diag.rateLimitSignal && !diag.botDetectSignal && diag.status === 'error' && diag.errorSample && (
               <p className="text-xs font-semibold text-red-400">
                 {diag.retailer === 'Best Buy' && !apiKeyPresent
                   ? 'API key is missing or invalid.'
@@ -213,7 +232,7 @@ function DiagnosticPanel({
       {/* Loading state */}
       {loading && !meta && (
         <div className="px-6 py-5 space-y-3">
-          {['Best Buy', 'Target'].map((r) => (
+          {['Best Buy', 'Target', 'Walmart'].map((r) => (
             <div key={r} className="flex items-center gap-4">
               <span className="w-2.5 h-2.5 rounded-full bg-[#1e1e2e] animate-pulse" />
               <span className="text-sm text-gray-600">{r}</span>
@@ -229,6 +248,7 @@ function DiagnosticPanel({
           key={diag.retailer}
           diag={diag}
           targetCache={meta.targetCache}
+          walmartCache={meta.walmartCache}
           apiKeyPresent={meta.apiKeyPresent.bestBuy}
         />
       ))}
@@ -450,7 +470,7 @@ export default function AdminPage() {
           <div className="flex flex-wrap items-center gap-4 mb-4">
             <FilterGroup
               label="Retailer"
-              options={['All', 'Best Buy', 'Target'] as RetailerFilter[]}
+              options={['All', 'Best Buy', 'Target', 'Walmart'] as RetailerFilter[]}
               value={retailerFilter}
               onChange={setRetailerFilter}
             />

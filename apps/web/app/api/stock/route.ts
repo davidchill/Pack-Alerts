@@ -1,7 +1,12 @@
 import { randomUUID } from 'crypto';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import * as cheerio from 'cheerio';
 import { NextResponse } from 'next/server';
 import { TARGET_PRODUCTS, type TargetProduct } from './target-products';
+import { WALMART_PRODUCTS, type WalmartProduct } from './walmart-products';
+
+const execFileAsync = promisify(execFile);
 
 const BESTBUY_KEY = process.env.BESTBUY_API_KEY;
 
@@ -16,7 +21,7 @@ const TARGET_VISITOR_ID = randomUUID().replace(/-/g, '').toUpperCase();
 export interface StockEntry {
   id: string;
   name: string;
-  retailer: 'Best Buy' | 'Target';
+  retailer: 'Best Buy' | 'Target' | 'Walmart';
   sku: string;
   url: string;
   image?: string;
@@ -27,7 +32,7 @@ export interface StockEntry {
 }
 
 export interface RetailerDiagnostic {
-  retailer: 'Best Buy' | 'Target';
+  retailer: 'Best Buy' | 'Target' | 'Walmart';
   status: 'ok' | 'degraded' | 'error';
   fetched: number;
   errored: number;
@@ -36,6 +41,7 @@ export interface RetailerDiagnostic {
   httpCodes: number[];        // distinct HTTP error codes seen (e.g. [403, 429])
   blockedSignal: boolean;     // 403 detected
   rateLimitSignal: boolean;   // 429 detected
+  botDetectSignal: boolean;   // bot-check page returned (HTTP 200 with bot challenge)
   errorSample: string | null; // first error message for display
 }
 
@@ -45,6 +51,12 @@ export interface DiagnosticMeta {
   targetCache: {
     warm: boolean;
     wasHit: boolean;          // true = response came from cache (no live fetch)
+    expiresAt: string | null;
+    ageMs: number | null;
+  };
+  walmartCache: {
+    warm: boolean;
+    wasHit: boolean;
     expiresAt: string | null;
     ageMs: number | null;
   };
@@ -242,6 +254,104 @@ async function fetchTargetProducts(): Promise<StockEntry[]> {
   return entries;
 }
 
+// ─── Walmart ──────────────────────────────────────────────────────────────────
+
+const WALMART_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+  'Accept-Language': 'en-US,en;q=0.9',
+  'Upgrade-Insecure-Requests': '1',
+  'sec-ch-ua': '"Chromium";v="136", "Google Chrome";v="136", "Not-A.Brand";v="99"',
+  'sec-ch-ua-mobile': '?0',
+  'sec-ch-ua-platform': '"Windows"',
+  'Sec-Fetch-Dest': 'document',
+  'Sec-Fetch-Mode': 'navigate',
+  'Sec-Fetch-Site': 'none',
+  'Sec-Fetch-User': '?1',
+};
+
+// Cache for 30 minutes — reduces HTML fetches and bot-detection surface
+const WALMART_CACHE_TTL_MS = 30 * 60 * 1000;
+let walmartCache: { entries: StockEntry[]; expiresAt: number; fetchedAt: number } | null = null;
+
+// Node.js fetch uses undici (HTTP/2 + OpenSSL) which Walmart flags via JA3
+// fingerprinting. curl uses the system TLS stack and passes the check.
+async function walmartCurlFetch(url: string): Promise<string> {
+  const headerArgs = Object.entries(WALMART_HEADERS).flatMap(([k, v]) => ['-H', `${k}: ${v}`]);
+  const { stdout } = await execFileAsync('curl', ['-sL', '--compressed', ...headerArgs, url], {
+    maxBuffer: 15 * 1024 * 1024,
+  });
+  return stdout;
+}
+
+function extractWalmartNextData(html: string): Record<string, unknown> {
+  const start = html.indexOf('<script id="__NEXT_DATA__"');
+  if (start === -1) throw new Error('Walmart __NEXT_DATA__ script tag not found');
+  const jsonStart = html.indexOf('>', start) + 1;
+  const jsonEnd = html.indexOf('</script>', jsonStart);
+  return JSON.parse(html.slice(jsonStart, jsonEnd)) as Record<string, unknown>;
+}
+
+async function fetchWalmartProduct(product: WalmartProduct): Promise<StockEntry> {
+  const html = await walmartCurlFetch(product.url);
+  if (html.includes('<title>Robot or human?</title>')) {
+    throw new Error('Walmart bot-detection triggered');
+  }
+
+  const data = extractWalmartNextData(html);
+  const item = (data as any)?.props?.pageProps?.initialData?.data?.product;
+  if (!item) throw new Error('Walmart product data not found in page');
+
+  const status: string = item.availabilityStatus ?? '';
+  const inStock = status === 'IN_STOCK' || status === 'AVAILABLE';
+  const rawPrice: number | undefined = item.priceInfo?.currentPrice?.price;
+  const price = rawPrice != null ? `$${rawPrice.toFixed(2)}` : undefined;
+  const image: string | undefined = item.imageInfo?.thumbnailUrl ?? undefined;
+
+  return {
+    id: product.id,
+    name: product.name,
+    retailer: 'Walmart',
+    sku: product.walmartId,
+    url: product.url,
+    image,
+    inStock,
+    price,
+    checkedAt: new Date().toISOString(),
+  };
+}
+
+async function fetchWalmartProducts(): Promise<StockEntry[]> {
+  if (walmartCache && Date.now() < walmartCache.expiresAt) {
+    return walmartCache.entries;
+  }
+
+  // Sequential with a 800ms pause — more conservative than Target given stricter bot detection
+  const entries: StockEntry[] = [];
+  for (let i = 0; i < WALMART_PRODUCTS.length; i++) {
+    if (i > 0) await delay(800);
+    const product = WALMART_PRODUCTS[i];
+    try {
+      entries.push(await fetchWalmartProduct(product));
+    } catch (e) {
+      entries.push({
+        id: product.id,
+        name: product.name,
+        retailer: 'Walmart' as const,
+        sku: product.walmartId,
+        url: product.url,
+        inStock: false,
+        checkedAt: new Date().toISOString(),
+        error: e instanceof Error ? e.message : 'Unknown error',
+      });
+    }
+  }
+
+  const now = Date.now();
+  walmartCache = { entries, expiresAt: now + WALMART_CACHE_TTL_MS, fetchedAt: now };
+  return entries;
+}
+
 // ─── Diagnostics ──────────────────────────────────────────────────────────────
 
 interface TimedResult {
@@ -256,7 +366,7 @@ async function withTiming(fn: () => Promise<StockEntry[]>): Promise<TimedResult>
 }
 
 function buildRetailerDiagnostic(
-  retailer: 'Best Buy' | 'Target',
+  retailer: 'Best Buy' | 'Target' | 'Walmart',
   result: PromiseSettledResult<TimedResult>,
   trackedCount?: number,
 ): RetailerDiagnostic {
@@ -274,6 +384,7 @@ function buildRetailerDiagnostic(
       httpCodes: code ? [code] : [],
       blockedSignal: code === 403,
       rateLimitSignal: code === 429,
+      botDetectSignal: msg.includes('bot-detection'),
       errorSample: msg,
     };
   }
@@ -283,12 +394,14 @@ function buildRetailerDiagnostic(
   const fetched = entries.length - erroredEntries.length;
 
   const httpCodes: number[] = [];
+  let botDetectSignal = false;
   for (const e of erroredEntries) {
     const match = e.error?.match(/\b(\d{3})\b/);
     if (match) {
       const code = parseInt(match[1]);
       if (!httpCodes.includes(code)) httpCodes.push(code);
     }
+    if (e.error?.includes('bot-detection')) botDetectSignal = true;
   }
 
   let status: 'ok' | 'degraded' | 'error';
@@ -310,6 +423,7 @@ function buildRetailerDiagnostic(
     httpCodes,
     blockedSignal: httpCodes.includes(403),
     rateLimitSignal: httpCodes.includes(429),
+    botDetectSignal,
     errorSample: erroredEntries[0]?.error ?? null,
   };
 }
@@ -336,6 +450,20 @@ export async function GET(request: Request) {
       ?? { id: `target-${testTcin}`, name: testTcin, tcin: testTcin, url: `https://www.target.com/p/-/A-${testTcin}` };
     try {
       const entry = await fetchTargetProduct(product);
+      return NextResponse.json(entry);
+    } catch (err) {
+      return NextResponse.json({ error: String(err) }, { status: 500 });
+    }
+  }
+
+  // Test a single Walmart product without warming the full cache
+  // Usage: /api/stock?walmart_id=XXXXXXXXXX
+  const testWalmartId = searchParams.get('walmart_id');
+  if (testWalmartId) {
+    const product = WALMART_PRODUCTS.find((p) => p.walmartId === testWalmartId)
+      ?? { id: `walmart-${testWalmartId}`, name: testWalmartId, walmartId: testWalmartId, url: `https://www.walmart.com/ip/${testWalmartId}` };
+    try {
+      const entry = await fetchWalmartProduct(product);
       return NextResponse.json(entry);
     } catch (err) {
       return NextResponse.json({ error: String(err) }, { status: 500 });
@@ -383,17 +511,20 @@ export async function GET(request: Request) {
     }
   }
 
-  // Snapshot cache state BEFORE fetching — determines wasHit after the await
-  const cacheWasWarm = targetCache !== null && Date.now() < targetCache.expiresAt;
+  // Snapshot cache states BEFORE fetching — determines wasHit after the awaits
+  const targetCacheWasWarm = targetCache !== null && Date.now() < targetCache.expiresAt;
+  const walmartCacheWasWarm = walmartCache !== null && Date.now() < walmartCache.expiresAt;
 
-  const [bbResult, targetResult] = await Promise.allSettled([
+  const [bbResult, targetResult, walmartResult] = await Promise.allSettled([
     withTiming(fetchBestBuyProducts),
     withTiming(fetchTargetProducts),
+    withTiming(fetchWalmartProducts),
   ]);
 
   const entries: StockEntry[] = [
     ...(bbResult.status === 'fulfilled' ? bbResult.value.entries : []),
     ...(targetResult.status === 'fulfilled' ? targetResult.value.entries : []),
+    ...(walmartResult.status === 'fulfilled' ? walmartResult.value.entries : []),
   ];
 
   const now = Date.now();
@@ -403,12 +534,19 @@ export async function GET(request: Request) {
     retailers: [
       buildRetailerDiagnostic('Best Buy', bbResult),
       buildRetailerDiagnostic('Target', targetResult, TARGET_PRODUCTS.length),
+      buildRetailerDiagnostic('Walmart', walmartResult, WALMART_PRODUCTS.length),
     ],
     targetCache: {
       warm: targetCache !== null && now < targetCache.expiresAt,
-      wasHit: cacheWasWarm,
+      wasHit: targetCacheWasWarm,
       expiresAt: targetCache ? new Date(targetCache.expiresAt).toISOString() : null,
       ageMs: targetCache ? now - targetCache.fetchedAt : null,
+    },
+    walmartCache: {
+      warm: walmartCache !== null && now < walmartCache.expiresAt,
+      wasHit: walmartCacheWasWarm,
+      expiresAt: walmartCache ? new Date(walmartCache.expiresAt).toISOString() : null,
+      ageMs: walmartCache ? now - walmartCache.fetchedAt : null,
     },
     apiKeyPresent: { bestBuy: !!BESTBUY_KEY },
   };

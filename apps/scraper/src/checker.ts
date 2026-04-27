@@ -2,6 +2,7 @@ import type { Product, StockResult } from '@packalert/types';
 import { checkPokemonCenter } from './retailers/pokemonCenter.js';
 import { checkTarget } from './retailers/target.js';
 import { checkBestBuy } from './retailers/bestbuy.js';
+import { checkWalmart } from './retailers/walmart.js';
 import { notifyDiscord } from './notifications/discord.js';
 
 // Tracks the last known state so we only fire on the out-of-stock → in-stock transition
@@ -12,6 +13,7 @@ async function checkProduct(product: Product): Promise<StockResult> {
     case 'pokemon-center': return checkPokemonCenter(product);
     case 'target':         return checkTarget(product);
     case 'best-buy':       return checkBestBuy(product);
+    case 'walmart':        return checkWalmart(product);
     default:
       throw new Error(`No checker implemented for retailer: ${product.retailer}`);
   }

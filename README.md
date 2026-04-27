@@ -14,8 +14,12 @@ A private `/admin` dashboard shows live stock status across all tracked products
 |---|---|---|
 | Best Buy | Official developer API | Lorcana, Star Wars Unlimited, Cardsmiths, and other first-party TCG products |
 | Target | Internal Redsky API (curated TCIN list) | Pokémon TCG, Magic: The Gathering, Yu-Gi-Oh!, One Piece, Disney Lorcana, Star Wars Unlimited, Digimon, Dragon Ball Super, Flesh and Blood, Union Arena |
+| Walmart | `__NEXT_DATA__` HTML parsing via curl (curated item ID list) | Pokémon TCG, Disney Lorcana, Magic: The Gathering, One Piece, Star Wars Unlimited |
 
-> **Note:** Best Buy's API only covers their first-party inventory. Pokémon TCG products on Best Buy are sold through their marketplace (third-party sellers) and are not accessible via the API. Pokémon Center is protected by Imperva bot detection and cannot be scraped server-side.
+> **Notes:**
+> - Best Buy's API only covers their first-party inventory. Pokémon TCG products on Best Buy are sold through their marketplace and are not accessible via the API.
+> - Pokémon Center is protected by Imperva bot detection and cannot be scraped server-side.
+> - Walmart uses JA3 TLS fingerprinting to block server-side requests. The web app shells out to `curl` (available on Windows via Git/System32) to bypass this; the admin panel is a local-only tool.
 
 ## Project structure
 
@@ -27,7 +31,8 @@ packalert/
 │   │       ├── retailers/
 │   │       │   ├── bestbuy.ts       # Best Buy API checker
 │   │       │   ├── target.ts        # Target Redsky API checker
-│   │       │   └── pokemonCenter.ts # Pokémon Center scraper
+│   │       │   ├── walmart.ts       # Walmart __NEXT_DATA__ scraper
+│   │       │   └── pokemonCenter.ts # Pokémon Center scraper (blocked by Imperva)
 │   │       ├── notifications/
 │   │       │   └── discord.ts       # Discord webhook notifications
 │   │       ├── products.ts          # Scraper watchlist (products to monitor)
@@ -39,8 +44,9 @@ packalert/
 │           ├── admin/
 │           │   └── page.tsx         # Private admin dashboard
 │           └── api/stock/
-│               ├── route.ts         # API route: fetches from Best Buy + Target
-│               └── target-products.ts  # Target TCIN list (edit to add products)
+│               ├── route.ts              # API route: fetches from Best Buy, Target, Walmart
+│               ├── target-products.ts    # Target TCIN list (edit to add products)
+│               └── walmart-products.ts   # Walmart item ID list (edit to add products)
 └── packages/
     └── types/            # Shared TypeScript types (Product, StockResult, Retailer)
 ```
@@ -107,8 +113,29 @@ Add a new entry:
 
 The admin dashboard fetches product details and availability using two Redsky endpoints per product: a 200ms pause separates the two calls within each product, and a 400ms pause separates consecutive products. Results are cached for 30 minutes.
 
+### Walmart
+Edit `apps/web/app/api/stock/walmart-products.ts`. Find the item ID at the end of any Walmart product URL:
+
+```
+https://www.walmart.com/ip/product-name/13816151308
+                                        ^^^^^^^^^^^
+                                        walmartId = 13816151308
+```
+
+Add a new entry:
+```ts
+{
+  id: 'walmart-my-product',
+  name: 'My TCG Product Name',
+  walmartId: '13816151308',
+  url: 'https://www.walmart.com/ip/product-name/13816151308',
+},
+```
+
+Products are fetched sequentially with an 800ms delay between each. Results are cached for 30 minutes. Walmart's bot detection is product-specific — newer or marketplace-only listings may require a retry.
+
 ### Scraper watchlist
-For Discord alerts, edit `apps/scraper/src/products.ts`. Products require `tcin` for Target or `sku` for Best Buy.
+For Discord alerts, edit `apps/scraper/src/products.ts`. Products require `tcin` for Target, `sku` for Best Buy, or `walmartId` for Walmart.
 
 ## GitHub Actions
 

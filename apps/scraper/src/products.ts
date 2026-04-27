@@ -16,4 +16,11 @@ export const watchlist: Product[] = [
     url: 'https://www.target.com/p/-/A-92831234',
     tcin: '92831234',
   },
+  {
+    id: 'prismatic-evolutions-etb-walmart',
+    name: 'Pokémon TCG: Scarlet & Violet — Prismatic Evolutions Elite Trainer Box',
+    retailer: 'walmart',
+    url: 'https://www.walmart.com/ip/Pokemon-Scarlet-Violet-Prismatic-Evolutions-Elite-Trainer-Box/13816151308',
+    walmartId: '13816151308',
+  },
 ];

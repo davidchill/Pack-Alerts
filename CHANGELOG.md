@@ -1,5 +1,46 @@
 # Changelog
 
+## v0.1.5 — 2026-04-27
+
+### Walmart retailer integration
+
+#### Shared types (`packages/types`)
+- Added `'walmart'` to the `Retailer` union type
+- Added `walmartId?: string` to the `Product` interface — the numeric item ID found at the end of any Walmart product URL (`walmart.com/ip/<slug>/<ITEMID>`)
+
+#### Scraper (`apps/scraper/src/retailers/walmart.ts`)
+- New `checkWalmart()` function: fetches the product page HTML, extracts product data from Walmart's embedded `__NEXT_DATA__` JSON (parsed via `indexOf` for efficiency, no regex over full HTML), and maps `availabilityStatus` (`IN_STOCK` / `AVAILABLE`) to a boolean
+- Fires a descriptive error if the "Robot or human?" bot-challenge page is returned instead of real HTML
+- Wired into `apps/scraper/src/checker.ts` alongside existing retailers
+
+#### Web app — API route (`apps/web/app/api/stock/route.ts`)
+- Added `'Walmart'` to the `StockEntry` and `RetailerDiagnostic` retailer union types
+- Added `botDetectSignal: boolean` to `RetailerDiagnostic` — fires when any product fetch returns Walmart's bot-challenge page (HTTP 200 with challenge body), distinct from HTTP 403 `blockedSignal`
+- Added `walmartCache` to `DiagnosticMeta` (same shape as `targetCache`: `warm`, `wasHit`, `expiresAt`, `ageMs`) — 30-minute TTL with the same cache-before-fetch snapshot pattern used by Target
+- `fetchWalmartProducts()` fetches products sequentially with an **800ms inter-product delay** (more conservative than Target's 400ms given stricter bot detection)
+- **Bot detection bypass**: Node.js `fetch` (undici) uses HTTP/2 and OpenSSL, both of which Walmart's JA3 TLS fingerprinting flags. Resolved by shelling out to `curl` via `execFile` — curl's TLS stack passes Walmart's check. The `walmartCurlFetch()` helper builds `-H` args from the shared `WALMART_HEADERS` object and runs `curl -sL --compressed`
+- Walmart request headers include `sec-ch-ua`, `sec-ch-ua-mobile`, and `sec-ch-ua-platform` Client Hints — required for higher-demand product pages (without them, newer listings return bot challenges even with correct `Sec-Fetch-*` headers)
+- Added `GET /api/stock?walmart_id=XXXXXXXXXX` probe endpoint — fetches a single Walmart product without warming the full cache, mirroring the existing `?target_tcin=` endpoint
+- Walmart fetcher wired into the main `Promise.allSettled` parallel fetch alongside Best Buy and Target
+
+#### Web app — Walmart product list (`apps/web/app/api/stock/walmart-products.ts`)
+- New file: 20 products across 5 brands, structured identically to `target-products.ts`
+- **Pokémon TCG (8 products):** Destined Rivals ETB, Booster Bundle, Sleeved Booster, Display Box (36 packs); Journey Together ETB, Booster Bundle, Booster Box; Prismatic Evolutions ETB and Booster Bundle
+- **Disney Lorcana (3 products):** Archazia's Island Booster Box and Gift Set; Fabled Booster Box
+- **Magic: The Gathering (4 products):** Final Fantasy Play Booster Display and Collector Booster Box; Edge of Eternities Play Booster Display and Collector Booster Box
+- **One Piece Card Game (2 products):** Two Legends OP-08 Booster Box; Anime 25th Collection EB-02 Booster Box
+- **Star Wars: Unlimited (3 products):** Legends of the Force, Jump to Lightspeed, and Twilight of the Republic Booster Boxes
+
+#### Web app — admin dashboard (`apps/web/app/admin/page.tsx`)
+- Added `'Walmart'` to all relevant type unions (`StockEntry.retailer`, `RetailerFilter`)
+- Walmart retailer badge: `#0071ce` (Walmart blue), consistent with the brand color scheme used for Best Buy (blue) and Target (red)
+- Retailer filter toolbar now includes a **Walmart** button
+- Loading skeleton in `DiagnosticPanel` now shows three rows (Best Buy, Target, Walmart) while a refresh is in flight
+- Walmart row in the API Health panel shows cache warm/cold state with expiry countdown, mirroring the Target cache display
+- Warning sub-row fires a descriptive bot-detection message when `botDetectSignal` is true, advising a retry or longer delay
+
+---
+
 ## v0.1.4 — 2026-04-26
 
 ### Target bot-detection hardening
