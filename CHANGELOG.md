@@ -1,5 +1,38 @@
 # Changelog
 
+## v0.1.6 — 2026-04-27
+
+### Barnes & Noble retailer integration (scaffolded; blocked by Akamai)
+
+#### New file: `apps/web/app/api/stock/barnes-and-noble-products.ts`
+- Starter catalog of 6 confirmed products with real B&N work IDs (the numeric suffix in any `barnesandnoble.com/w/<slug>/<ID>` URL)
+- **Pokémon TCG (4 products):** Prismatic Evolutions ETB; Journey Together Booster Bundle; Mega Evolution Series 1 Booster Bundle; Mega Evolution Phantasmal Flames ETB
+- **Disney Lorcana (2 products):** Archazia's Island Illumineer's Trove Box; Archazia's Island Gift Set
+- `BNProduct` interface (`id`, `name`, `bnId`, `url`) mirrors the pattern of `WalmartProduct` and `TargetProduct`
+
+#### Web app — API route (`apps/web/app/api/stock/route.ts`)
+- Added `'Barnes & Noble'` to the `StockEntry` and `RetailerDiagnostic` retailer union types
+- Added `bnCache` field to `DiagnosticMeta` (same shape as `targetCache` / `walmartCache`)
+- New `bnCurlFetch()` helper using curl with browser-like headers (same TLS bypass strategy as Walmart)
+- New `extractBNStockData()` — primary strategy is JSON-LD `@type: Product` schema extraction (`offers.availability`); falls back to HTML text pattern matching (`"out of stock"`, `"notify me when available"`, `"add to cart"`)
+- **Akamai Bot Manager detection:** B&N uses Akamai's JavaScript challenge (not Imperva), which returns a ~1 KB challenge page requiring XHR execution before serving real content; `fetchBNProduct` detects this via `sec-if-cpt-container` / `scf-akamai-logo` markers (and a 5 KB size floor) and throws `'Barnes & Noble bot-detection triggered (Akamai JS challenge)'`
+- `fetchBNProducts()` with 30-minute cache and 800ms inter-request delay, matching Walmart's conservative approach
+- `GET /api/stock?bn_id=XXXXXXXXXX` probe endpoint — tests a single B&N product without warming the full cache, mirroring `?target_tcin=` and `?walmart_id=`
+- B&N wired into the main `Promise.allSettled` fan-out and `buildRetailerDiagnostic`
+
+#### Web app — admin dashboard (`apps/web/app/admin/page.tsx`)
+- Added `'Barnes & Noble'` to `StockEntry.retailer` and `RetailerFilter` types
+- Retailer badge: forest green (`bg-green-900/30 text-green-400`) — visually distinct from Best Buy (blue), Target (red), Walmart (brand blue), and the In Stock accent (`#00ff88`)
+- "Barnes & Noble" added to the Retailer filter button group and the loading skeleton placeholder list
+- `RetailerRow` now accepts and displays `bnCache` warm/cold state with expiry countdown
+- Bot-detection warning is now retailer-aware: B&N shows "Akamai JS challenge detected — requires a browser-capable fetch strategy"; Walmart continues to show the retry/delay suggestion
+- `buildRetailerDiagnostic` parameter type extended to include `'Barnes & Noble'`
+
+#### Current status
+B&N is fully wired into the UI and API but all 6 products will show as errors (Akamai challenge) until the fetch strategy is upgraded. Options: Playwright headless browser in the API route, a scraping proxy service (ScrapingBee / ZenRows), or `curl-impersonate` binaries if available server-side. The product catalog, types, cache logic, probe endpoint, and UI are all ready — only `bnCurlFetch()` needs to change.
+
+---
+
 ## v0.1.5 — 2026-04-27
 
 ### Walmart retailer integration

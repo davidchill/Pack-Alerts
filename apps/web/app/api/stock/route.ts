@@ -5,6 +5,7 @@ import * as cheerio from 'cheerio';
 import { NextResponse } from 'next/server';
 import { TARGET_PRODUCTS, type TargetProduct } from './target-products';
 import { WALMART_PRODUCTS, type WalmartProduct } from './walmart-products';
+import { BN_PRODUCTS, type BNProduct } from './barnes-and-noble-products';
 
 const execFileAsync = promisify(execFile);
 
@@ -21,7 +22,7 @@ const TARGET_VISITOR_ID = randomUUID().replace(/-/g, '').toUpperCase();
 export interface StockEntry {
   id: string;
   name: string;
-  retailer: 'Best Buy' | 'Target' | 'Walmart';
+  retailer: 'Best Buy' | 'Target' | 'Walmart' | 'Barnes & Noble';
   sku: string;
   url: string;
   image?: string;
@@ -32,7 +33,7 @@ export interface StockEntry {
 }
 
 export interface RetailerDiagnostic {
-  retailer: 'Best Buy' | 'Target' | 'Walmart';
+  retailer: 'Best Buy' | 'Target' | 'Walmart' | 'Barnes & Noble';
   status: 'ok' | 'degraded' | 'error';
   fetched: number;
   errored: number;
@@ -55,6 +56,12 @@ export interface DiagnosticMeta {
     ageMs: number | null;
   };
   walmartCache: {
+    warm: boolean;
+    wasHit: boolean;
+    expiresAt: string | null;
+    ageMs: number | null;
+  };
+  bnCache: {
     warm: boolean;
     wasHit: boolean;
     expiresAt: string | null;
@@ -352,6 +359,136 @@ async function fetchWalmartProducts(): Promise<StockEntry[]> {
   return entries;
 }
 
+// ─── Barnes & Noble ───────────────────────────────────────────────────────────
+
+const BN_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+  'Accept-Language': 'en-US,en;q=0.9',
+  'Upgrade-Insecure-Requests': '1',
+  'sec-ch-ua': '"Chromium";v="136", "Google Chrome";v="136", "Not-A.Brand";v="99"',
+  'sec-ch-ua-mobile': '?0',
+  'sec-ch-ua-platform': '"Windows"',
+  'Sec-Fetch-Dest': 'document',
+  'Sec-Fetch-Mode': 'navigate',
+  'Sec-Fetch-Site': 'none',
+  'Sec-Fetch-User': '?1',
+};
+
+const BN_CACHE_TTL_MS = 30 * 60 * 1000;
+let bnCache: { entries: StockEntry[]; expiresAt: number; fetchedAt: number } | null = null;
+
+async function bnCurlFetch(url: string): Promise<string> {
+  const headerArgs = Object.entries(BN_HEADERS).flatMap(([k, v]) => ['-H', `${k}: ${v}`]);
+  const { stdout } = await execFileAsync('curl', ['-sL', '--compressed', ...headerArgs, url], {
+    maxBuffer: 15 * 1024 * 1024,
+  });
+  return stdout;
+}
+
+function extractBNStockData(html: string): { inStock: boolean; price?: string; image?: string } {
+  // JSON-LD Product schema is the most reliable signal
+  const ldPattern = /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = ldPattern.exec(html)) !== null) {
+    try {
+      const data = JSON.parse(match[1]);
+      const items: unknown[] = Array.isArray(data) ? data : [data];
+      for (const item of items) {
+        if ((item as any)['@type'] === 'Product') {
+          const offers = (item as any).offers;
+          if (offers) {
+            const offer = Array.isArray(offers) ? offers[0] : offers;
+            const avail: string = offer.availability ?? '';
+            const inStock = avail.includes('InStock') || avail.includes('OnlineOnly');
+            const rawPrice = offer.price != null ? parseFloat(String(offer.price)) : NaN;
+            const price = !isNaN(rawPrice) ? `$${rawPrice.toFixed(2)}` : undefined;
+            const img = (item as any).image;
+            const image = typeof img === 'string' ? img : Array.isArray(img) ? img[0] : undefined;
+            return { inStock, price, image };
+          }
+        }
+      }
+    } catch {
+      // malformed JSON-LD — try next tag
+    }
+  }
+
+  // Fall back to HTML text patterns
+  const lower = html.toLowerCase();
+  const outOfStockSignals = [
+    'out of stock',
+    'temporarily unavailable',
+    'not available for purchase',
+    'notify me when available',
+    'currently unavailable',
+  ];
+  const isOutOfStock = outOfStockSignals.some((s) => lower.includes(s));
+  if (isOutOfStock) {
+    const priceMatch = html.match(/\$\s*(\d+(?:\.\d{2})?)/);
+    return { inStock: false, price: priceMatch ? `$${priceMatch[1]}` : undefined };
+  }
+
+  const hasAddToCart = lower.includes('add to cart');
+  const priceMatch = html.match(/\$\s*(\d+(?:\.\d{2})?)/);
+  return { inStock: hasAddToCart, price: priceMatch ? `$${priceMatch[1]}` : undefined };
+}
+
+async function fetchBNProduct(product: BNProduct): Promise<StockEntry> {
+  const html = await bnCurlFetch(product.url);
+
+  // Akamai Bot Manager challenge page (used by B&N) — JS execution required,
+  // not solvable with curl alone
+  if (html.includes('sec-if-cpt-container') || html.includes('scf-akamai-logo') || html.length < 5000) {
+    throw new Error('Barnes & Noble bot-detection triggered (Akamai JS challenge)');
+  }
+
+  const { inStock, price, image } = extractBNStockData(html);
+
+  return {
+    id: product.id,
+    name: product.name,
+    retailer: 'Barnes & Noble',
+    sku: product.bnId,
+    url: product.url,
+    image,
+    inStock,
+    price,
+    checkedAt: new Date().toISOString(),
+  };
+}
+
+async function fetchBNProducts(): Promise<StockEntry[]> {
+  if (bnCache && Date.now() < bnCache.expiresAt) {
+    return bnCache.entries;
+  }
+
+  // Sequential with 800ms pause — conservative to avoid triggering bot detection
+  const entries: StockEntry[] = [];
+  for (let i = 0; i < BN_PRODUCTS.length; i++) {
+    if (i > 0) await delay(800);
+    const product = BN_PRODUCTS[i];
+    try {
+      entries.push(await fetchBNProduct(product));
+    } catch (e) {
+      entries.push({
+        id: product.id,
+        name: product.name,
+        retailer: 'Barnes & Noble' as const,
+        sku: product.bnId,
+        url: product.url,
+        inStock: false,
+        checkedAt: new Date().toISOString(),
+        error: e instanceof Error ? e.message : 'Unknown error',
+      });
+    }
+  }
+
+  const now = Date.now();
+  bnCache = { entries, expiresAt: now + BN_CACHE_TTL_MS, fetchedAt: now };
+  return entries;
+}
+
 // ─── Diagnostics ──────────────────────────────────────────────────────────────
 
 interface TimedResult {
@@ -366,7 +503,7 @@ async function withTiming(fn: () => Promise<StockEntry[]>): Promise<TimedResult>
 }
 
 function buildRetailerDiagnostic(
-  retailer: 'Best Buy' | 'Target' | 'Walmart',
+  retailer: 'Best Buy' | 'Target' | 'Walmart' | 'Barnes & Noble',
   result: PromiseSettledResult<TimedResult>,
   trackedCount?: number,
 ): RetailerDiagnostic {
@@ -470,6 +607,20 @@ export async function GET(request: Request) {
     }
   }
 
+  // Test a single Barnes & Noble product without warming the full cache
+  // Usage: /api/stock?bn_id=XXXXXXXXXX
+  const testBnId = searchParams.get('bn_id');
+  if (testBnId) {
+    const product = BN_PRODUCTS.find((p) => p.bnId === testBnId)
+      ?? { id: `bn-${testBnId}`, name: testBnId, bnId: testBnId, url: `https://www.barnesandnoble.com/w/-/${testBnId}` };
+    try {
+      const entry = await fetchBNProduct(product);
+      return NextResponse.json(entry);
+    } catch (err) {
+      return NextResponse.json({ error: String(err) }, { status: 500 });
+    }
+  }
+
   // Probe a single Pokémon Center URL to test reachability and selector validity
   // Usage: /api/stock?pc_url=https%3A%2F%2Fwww.pokemoncenter.com%2Fproduct%2F...
   const pcUrl = searchParams.get('pc_url');
@@ -514,17 +665,20 @@ export async function GET(request: Request) {
   // Snapshot cache states BEFORE fetching — determines wasHit after the awaits
   const targetCacheWasWarm = targetCache !== null && Date.now() < targetCache.expiresAt;
   const walmartCacheWasWarm = walmartCache !== null && Date.now() < walmartCache.expiresAt;
+  const bnCacheWasWarm = bnCache !== null && Date.now() < bnCache.expiresAt;
 
-  const [bbResult, targetResult, walmartResult] = await Promise.allSettled([
+  const [bbResult, targetResult, walmartResult, bnResult] = await Promise.allSettled([
     withTiming(fetchBestBuyProducts),
     withTiming(fetchTargetProducts),
     withTiming(fetchWalmartProducts),
+    withTiming(fetchBNProducts),
   ]);
 
   const entries: StockEntry[] = [
     ...(bbResult.status === 'fulfilled' ? bbResult.value.entries : []),
     ...(targetResult.status === 'fulfilled' ? targetResult.value.entries : []),
     ...(walmartResult.status === 'fulfilled' ? walmartResult.value.entries : []),
+    ...(bnResult.status === 'fulfilled' ? bnResult.value.entries : []),
   ];
 
   const now = Date.now();
@@ -535,6 +689,7 @@ export async function GET(request: Request) {
       buildRetailerDiagnostic('Best Buy', bbResult),
       buildRetailerDiagnostic('Target', targetResult, TARGET_PRODUCTS.length),
       buildRetailerDiagnostic('Walmart', walmartResult, WALMART_PRODUCTS.length),
+      buildRetailerDiagnostic('Barnes & Noble', bnResult, BN_PRODUCTS.length),
     ],
     targetCache: {
       warm: targetCache !== null && now < targetCache.expiresAt,
@@ -547,6 +702,12 @@ export async function GET(request: Request) {
       wasHit: walmartCacheWasWarm,
       expiresAt: walmartCache ? new Date(walmartCache.expiresAt).toISOString() : null,
       ageMs: walmartCache ? now - walmartCache.fetchedAt : null,
+    },
+    bnCache: {
+      warm: bnCache !== null && now < bnCache.expiresAt,
+      wasHit: bnCacheWasWarm,
+      expiresAt: bnCache ? new Date(bnCache.expiresAt).toISOString() : null,
+      ageMs: bnCache ? now - bnCache.fetchedAt : null,
     },
     apiKeyPresent: { bestBuy: !!BESTBUY_KEY },
   };

@@ -15,11 +15,13 @@ A private `/admin` dashboard shows live stock status across all tracked products
 | Best Buy | Official developer API | Lorcana, Star Wars Unlimited, Cardsmiths, and other first-party TCG products |
 | Target | Internal Redsky API (curated TCIN list) | Pokémon TCG, Magic: The Gathering, Yu-Gi-Oh!, One Piece, Disney Lorcana, Star Wars Unlimited, Digimon, Dragon Ball Super, Flesh and Blood, Union Arena |
 | Walmart | `__NEXT_DATA__` HTML parsing via curl (curated item ID list) | Pokémon TCG, Disney Lorcana, Magic: The Gathering, One Piece, Star Wars Unlimited |
+| Barnes & Noble | ⚠️ Scaffolded — blocked by Akamai JS challenge | Pokémon TCG, Disney Lorcana (6 products catalogued) |
 
 > **Notes:**
 > - Best Buy's API only covers their first-party inventory. Pokémon TCG products on Best Buy are sold through their marketplace and are not accessible via the API.
 > - Pokémon Center is protected by Imperva bot detection and cannot be scraped server-side.
 > - Walmart uses JA3 TLS fingerprinting to block server-side requests. The web app shells out to `curl` (available on Windows via Git/System32) to bypass this; the admin panel is a local-only tool.
+> - Barnes & Noble uses **Akamai Bot Manager**, which requires JavaScript execution to pass its challenge. All B&N types, product catalog, cache, probe endpoint, and UI are implemented — only the fetch strategy needs upgrading (Playwright, `curl-impersonate`, or a scraping proxy).
 
 ## Project structure
 
@@ -44,9 +46,10 @@ packalert/
 │           ├── admin/
 │           │   └── page.tsx         # Private admin dashboard
 │           └── api/stock/
-│               ├── route.ts              # API route: fetches from Best Buy, Target, Walmart
-│               ├── target-products.ts    # Target TCIN list (edit to add products)
-│               └── walmart-products.ts   # Walmart item ID list (edit to add products)
+│               ├── route.ts                      # API route: fetches from Best Buy, Target, Walmart, B&N
+│               ├── target-products.ts            # Target TCIN list (edit to add products)
+│               ├── walmart-products.ts           # Walmart item ID list (edit to add products)
+│               └── barnes-and-noble-products.ts  # B&N work ID list (edit to add products)
 └── packages/
     └── types/            # Shared TypeScript types (Product, StockResult, Retailer)
 ```
@@ -133,6 +136,27 @@ Add a new entry:
 ```
 
 Products are fetched sequentially with an 800ms delay between each. Results are cached for 30 minutes. Walmart's bot detection is product-specific — newer or marketplace-only listings may require a retry.
+
+### Barnes & Noble
+Edit `apps/web/app/api/stock/barnes-and-noble-products.ts`. Find the work ID at the end of any B&N product URL:
+
+```
+https://www.barnesandnoble.com/w/product-name/1147031981
+                                              ^^^^^^^^^^
+                                              bnId = 1147031981
+```
+
+Add a new entry:
+```ts
+{
+  id: 'bn-my-product',
+  name: 'My TCG Product Name',
+  bnId: '1147031981',
+  url: 'https://www.barnesandnoble.com/w/product-name/1147031981',
+},
+```
+
+> ⚠️ B&N is currently blocked by Akamai's JavaScript challenge. Products will show as errors in the health panel until the fetch strategy is upgraded to support JS execution.
 
 ### Scraper watchlist
 For Discord alerts, edit `apps/scraper/src/products.ts`. Products require `tcin` for Target, `sku` for Best Buy, or `walmartId` for Walmart.
